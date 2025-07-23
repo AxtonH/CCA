@@ -28,6 +28,7 @@ import tempfile
 import os
 import time
 from email_templates import get_template_by_type
+import requests
 
 # Note: We now use Odoo-generated PDFs instead of ReportLab
 
@@ -328,50 +329,7 @@ class OdooConnector:
             st.error(f"Error fetching invoices: {str(e)}")
             return []
     
-    def download_invoice_pdf(self, invoice_id):
-        """Download the actual Odoo-generated PDF for an invoice"""
-        try:
-            if not self.models:
-                return None
-            
-            # Call the report generation method in Odoo
-            # This uses the standard Odoo report generation
-            report_data = self.models.execute_kw(
-                self.database, self.uid, self.password,
-                'account.move', 'print_report',
-                [[invoice_id]],  # List of invoice IDs
-                {'report_name': 'account.report_invoice'}  # Standard invoice report
-            )
-            
-            if report_data and 'data' in report_data:
-                # The report data should contain the PDF content
-                pdf_content = report_data['data']
-                
-                # Create a BytesIO object for the attachment
-                import io
-                pdf_buffer = io.BytesIO(pdf_content)
-                
-                # Get invoice details for filename
-                invoice_details = self.models.execute_kw(
-                    self.database, self.uid, self.password,
-                    'account.move', 'read',
-                    [[invoice_id]],
-                    {'fields': ['name']}
-                )
-                
-                if invoice_details:
-                    invoice_name = invoice_details[0]['name']
-                    pdf_buffer.name = f"{invoice_name}.pdf"
-                else:
-                    pdf_buffer.name = f"Invoice_{invoice_id}.pdf"
-                
-                return pdf_buffer
-            
-            return None
-            
-        except Exception as e:
-            st.error(f"Error downloading invoice PDF for ID {invoice_id}: {str(e)}")
-            return None
+
 
 def send_email(sender_email, sender_password, recipient_email, cc_list, subject, body, attachments=None, smtp_server="smtp.gmail.com", smtp_port=587):
     """Send email with optional PDF attachments using SMTP"""
@@ -469,6 +427,385 @@ def generate_email_template(client_name, invoices, template_type="initial"):
     return subject, html_body
 
 
+
+class InvoicePDFGenerator:
+    def __init__(self, odoo_connector):
+        self.connector = odoo_connector
+        self.driver = None
+    
+    def generate_client_invoices_pdf(self, client_name, partner_id, progress_callback=None):
+        """Generate PDF with all invoices for a client using API-first approach"""
+        try:
+            if progress_callback:
+                progress_callback(f"Generating PDF for {client_name}...", 0.1)
+            
+            # Try API method first (more reliable and faster)
+            pdf_data = self._generate_pdf_via_api(client_name, partner_id, progress_callback)
+            if pdf_data:
+                if progress_callback:
+                    progress_callback(f"PDF generated successfully via API for {client_name}", 1.0)
+                return pdf_data
+            
+            # Only fall back to browser automation if API completely fails
+            if progress_callback:
+                progress_callback(f"API methods failed, trying browser automation for {client_name}...", 0.5)
+            
+            # For now, let's skip browser automation and just return None
+            # This will force users to rely on the more reliable API method
+            if progress_callback:
+                progress_callback(f"Browser automation disabled - API method failed for {client_name}", 1.0)
+            
+            st.warning(f"⚠️ PDF generation failed for {client_name}. Please check if the client has invoices and try again.")
+            return None
+            
+        except Exception as e:
+            st.error(f"Error generating PDF for {client_name}: {str(e)}")
+            return None
+    
+    def _generate_pdf_via_api(self, client_name, partner_id, progress_callback=None):
+        """Generate PDF using Odoo v17 API with follow-up report filtering"""
+        try:
+            if not self.connector.models:
+                return None
+            
+            if progress_callback:
+                progress_callback(f"Getting partner ID for {client_name}...", 0.1)
+            
+            # First, get the partner ID if we don't have it
+            if isinstance(partner_id, str):
+                # partner_id is actually the client name, so we need to find the partner ID
+                partner_ids = self.connector.models.execute_kw(
+                    self.connector.database, self.connector.uid, self.connector.password,
+                    'res.partner', 'search',
+                    [[('name', '=', partner_id)]]
+                )
+                if not partner_ids:
+                    st.error(f"❌ No partner found for client: {client_name}")
+                    return None
+                partner_id = partner_ids[0]
+                st.success(f"✅ Found partner ID {partner_id} for client: {client_name}")
+            
+            if progress_callback:
+                progress_callback(f"Getting overdue invoice IDs for {client_name}...", 0.3)
+            
+            # Get only OVERDUE invoice IDs for this client (follow-up report criteria)
+            today = datetime.now().date()
+            invoice_ids = self.connector.models.execute_kw(
+                self.connector.database, self.connector.uid, self.connector.password,
+                'account.move', 'search',
+                [[('partner_id', '=', partner_id), 
+                  ('move_type', '=', 'out_invoice'),
+                  ('state', '=', 'posted'),
+                  ('payment_state', '!=', 'paid'),
+                  ('invoice_date_due', '<', today.isoformat())]]
+            )
+            
+            if not invoice_ids:
+                st.error(f"❌ No overdue invoices found for {client_name}")
+                return None
+            
+            st.success(f"✅ Found {len(invoice_ids)} overdue invoices for {client_name}: {invoice_ids}")
+            
+            if progress_callback:
+                progress_callback(f"Found {len(invoice_ids)} overdue invoices for {client_name}...", 0.5)
+            
+            # Method 1: Try to get report ID first, then use report action
+            try:
+                if progress_callback:
+                    progress_callback(f"Trying to get report ID for {client_name}...", 0.6)
+                
+                st.info(f"🔍 Trying Method 1: Report action for {client_name}")
+                
+                # First, find the report action
+                report_ids = self.connector.models.execute_kw(
+                    self.connector.database, self.connector.uid, self.connector.password,
+                    'ir.actions.report', 'search',
+                    [[('report_name', '=', 'account.report_invoice')]]
+                )
+                
+                if report_ids:
+                    # Get the report action
+                    report_action = self.connector.models.execute_kw(
+                        self.connector.database, self.connector.uid, self.connector.password,
+                        'ir.actions.report', 'read',
+                        [report_ids[0]],
+                        {'fields': ['id', 'name', 'report_name', 'report_type']}
+                    )
+                    
+                    st.success(f"✅ Found report action: {report_action}")
+                    
+                    # Try to execute the report action
+                    pdf_data = self.connector.models.execute_kw(
+                        self.connector.database, self.connector.uid, self.connector.password,
+                        'ir.actions.report', 'run',
+                        [report_ids[0], invoice_ids]
+                    )
+                    
+                    if pdf_data:
+                        import base64
+                        if isinstance(pdf_data, str):
+                            try:
+                                return base64.b64decode(pdf_data)
+                            except:
+                                pass
+                        elif isinstance(pdf_data, bytes):
+                            return pdf_data
+                else:
+                    st.warning(f"⚠️ No report action found for account.report_invoice")
+            except Exception as e:
+                st.error(f"❌ Method 1 failed: {str(e)}")
+                pass  # Silently fail and try next method
+            
+            # Method 2: Try alternative report names
+            try:
+                if progress_callback:
+                    progress_callback(f"Trying alternative report names for {client_name}...", 0.7)
+                
+                # Try different report names that might exist
+                report_names = [
+                    'account.report_invoice_document',
+                    'account.report_invoice_with_payments',
+                    'account.report_invoice_simple',
+                    'account.report_invoice'
+                ]
+                
+                for report_name in report_names:
+                    try:
+                        # Search for this report
+                        report_ids = self.connector.models.execute_kw(
+                            self.connector.database, self.connector.uid, self.connector.password,
+                            'ir.actions.report', 'search',
+                            [[('report_name', '=', report_name)]]
+                        )
+                        
+                        if report_ids:
+                            # Try to execute the report
+                            pdf_data = self.connector.models.execute_kw(
+                                self.connector.database, self.connector.uid, self.connector.password,
+                                'ir.actions.report', 'run',
+                                [report_ids[0], invoice_ids]
+                            )
+                            
+                            if pdf_data:
+                                import base64
+                                if isinstance(pdf_data, str):
+                                    try:
+                                        return base64.b64decode(pdf_data)
+                                    except:
+                                        pass
+                                elif isinstance(pdf_data, bytes):
+                                    return pdf_data
+                    except Exception as e:
+                        continue  # Silently fail and try next report
+            except Exception as e:
+                pass  # Silently fail and try next method
+            
+            # Method 3: Try direct HTTP request with proper Odoo v17 authentication
+            try:
+                if progress_callback:
+                    progress_callback(f"Trying direct HTTP request for {client_name}...", 0.8)
+                
+                st.info(f"🔍 Trying Method 3: HTTP request for {client_name}")
+                
+                if self.connector.url and invoice_ids:
+                    import requests
+                    
+                    # Create a session to maintain cookies
+                    session = requests.Session()
+                    session.headers.update({
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    })
+                    
+                    # First, try to authenticate using Odoo v17 method
+                    login_url = f"{self.connector.url}/web/session/authenticate"
+                    login_data = {
+                        'jsonrpc': '2.0',
+                        'method': 'call',
+                        'params': {
+                            'db': self.connector.database,
+                            'login': self.connector.username,
+                            'password': self.connector.password
+                        }
+                    }
+                    
+                    login_response = session.post(login_url, json=login_data, timeout=30)
+                    
+                    if login_response.status_code == 200:
+                        # Try to parse the login response
+                        try:
+                            login_result = login_response.json()
+                            if login_result.get('result', {}).get('uid'):
+                                st.success(f"✅ Login successful for {client_name}")
+                            else:
+                                st.error(f"❌ Login failed for {client_name}: {login_result}")
+                        except:
+                            st.error(f"❌ Could not parse login response for {client_name}")
+                        
+                        # Try the report URL with Odoo v17 format
+                        report_url = f"{self.connector.url}/report/pdf/account.report_invoice/{','.join(map(str, invoice_ids))}"
+                        response = session.get(report_url, timeout=30)
+                        
+                        if response.status_code == 200:
+                            content_type = response.headers.get('content-type', '')
+                            if 'application/pdf' in content_type or response.content.startswith(b'%PDF'):
+                                st.success(f"✅ HTTP request successful for {client_name} - PDF size: {len(response.content)} bytes")
+                                return response.content
+                            else:
+                                st.error(f"❌ HTTP request returned non-PDF content for {client_name}: {content_type}")
+                                st.error(f"❌ Response length: {len(response.content)} bytes")
+                                # Show first 200 characters for debugging
+                                try:
+                                    st.error(f"❌ Response preview: {response.text[:200]}...")
+                                except:
+                                    st.error("❌ Could not decode response text")
+                        else:
+                            st.error(f"❌ HTTP request failed for {client_name} with status: {response.status_code}")
+                            try:
+                                st.error(f"❌ Response content: {response.text[:200]}...")
+                            except:
+                                st.error("❌ Could not decode error response")
+            except Exception as e:
+                pass  # Silently fail and try next method
+            
+            # Method 4: Try to create a custom report action
+            try:
+                if progress_callback:
+                    progress_callback(f"Trying custom report action for {client_name}...", 0.9)
+                
+                # Try to create a custom report action for the invoices
+                action_data = {
+                    'name': f'Invoice Report for {client_name}',
+                    'report_name': 'account.report_invoice',
+                    'report_type': 'qweb-pdf',
+                    'model': 'account.move',
+                    'data': invoice_ids
+                }
+                
+                # Try to create and execute the action
+                action_id = self.connector.models.execute_kw(
+                    self.connector.database, self.connector.uid, self.connector.password,
+                    'ir.actions.report', 'create',
+                    [action_data]
+                )
+                
+                if action_id:
+                    # Try to execute the custom action
+                    pdf_data = self.connector.models.execute_kw(
+                        self.connector.database, self.connector.uid, self.connector.password,
+                        'ir.actions.report', 'run',
+                        [action_id, invoice_ids]
+                    )
+                    
+                    if pdf_data:
+                        import base64
+                        if isinstance(pdf_data, str):
+                            try:
+                                return base64.b64decode(pdf_data)
+                            except:
+                                pass
+                        elif isinstance(pdf_data, bytes):
+                            return pdf_data
+            except Exception as e:
+                pass  # Silently fail and try next method
+            
+            return None
+            
+        except Exception as e:
+            return None
+    
+    def _generate_pdf_via_browser(self, client_name, partner_id, progress_callback=None):
+        """Generate PDF using browser automation"""
+        try:
+            if progress_callback:
+                progress_callback(f"Starting browser for {client_name}...", 0.3)
+            
+            # Setup browser
+            self._setup_browser()
+            
+            if progress_callback:
+                progress_callback(f"Navigating to Odoo for {client_name}...", 0.4)
+            
+            # Navigate to Odoo
+            self.driver.get(f"{self.connector.url}/web")
+            
+            # Login
+            self._login_to_odoo()
+            
+            if progress_callback:
+                progress_callback(f"Finding invoices for {client_name}...", 0.6)
+            
+            # Navigate to invoices
+            self._navigate_to_invoices()
+            
+            # Navigate to client and click invoices button
+            self._navigate_to_client_invoices(client_name)
+            
+            if progress_callback:
+                progress_callback(f"Selecting invoices for {client_name}...", 0.8)
+            
+            # Select all invoices
+            self._select_all_invoices()
+            
+            if progress_callback:
+                progress_callback(f"Generating PDF for {client_name}...", 0.9)
+            
+            # Print/Download PDF
+            pdf_data = self._download_pdf()
+            
+            return pdf_data
+            
+        except Exception as e:
+            st.error(f"Browser automation failed for {client_name}: {str(e)}")
+            
+            # Add debugging information
+            try:
+                if self.driver:
+                    st.error(f"Current URL: {self.driver.current_url}")
+                    st.error(f"Page title: {self.driver.title}")
+                    
+                    # Take screenshot for debugging
+                    screenshot_path = os.path.join(tempfile.gettempdir(), f"debug_{client_name.replace(' ', '_')}.png")
+                    self.driver.save_screenshot(screenshot_path)
+                    st.error(f"Debug screenshot saved to: {screenshot_path}")
+            except:
+                pass
+            
+            return None
+        finally:
+            self._cleanup_browser()
+    
+    def _setup_browser(self):
+        """Setup browser with appropriate options"""
+        try:
+            # Try Chrome first
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_experimental_option("prefs", {
+                "download.default_directory": tempfile.gettempdir(),
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True,
+                "plugins.always_open_pdf_externally": True
+            })
+            
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            return
+            
+        except Exception as e:
+            try:
+                # Try Firefox
+                firefox_options = webdriver.FirefoxOptions()
+                firefox_options.add_argument("--headless")
+                
+                service = Service(GeckoDriverManager().install())
+                self.driver = webdriver.Firefox(service=service, options=firefox_options)
+                return
+                
+            except Exception as e2:
+                raise Exception(f"Failed to setup browser: {str(e2)}")
 
 def get_automatic_iban_attachment(reference_company):
     """Get automatic IBAN letter attachment based on reference company"""
@@ -1113,9 +1450,8 @@ with tab2:
                                 iban_filename = "IBAN Letter _ Prezlab FZ LLC .pdf" if reference_company == "Prezlab FZ LLC" else "IBAN Letter _ Prezlab Advanced Design Company .pdf"
                                 attachment_list.append(f"🏦 {iban_filename} (automatic - {reference_company})")
                             
-                            # Invoice PDFs
-                            for invoice in client_invoices_list:
-                                attachment_list.append(f"📄 {invoice['invoice_number']}.pdf (Odoo-generated)")
+                            # Invoice PDF
+                            attachment_list.append(f"📄 Invoices_{client}.pdf (Odoo-generated - all invoices)")
                             
                             if attachment_list:
                                 for attachment in attachment_list:
@@ -1205,19 +1541,30 @@ with tab2:
                             else:
                                 st.warning(f"⚠️ No IBAN letter found for {reference_company}")
                             
-                            # Download and add Odoo-generated invoice PDFs for each invoice
-                            st.info(f"📄 Downloading Odoo invoice PDFs for {len(client_invoices_list)} invoice(s)...")
-                            for invoice in client_invoices_list:
-                                # Get the Odoo connector from session state
-                                if 'connector' in st.session_state:
-                                    invoice_pdf = st.session_state.connector.download_invoice_pdf(invoice['invoice_id'])
-                                    if invoice_pdf:
-                                        all_attachments.append(invoice_pdf)
-                                        st.success(f"📄 Downloaded Odoo PDF for invoice: {invoice['invoice_number']}")
-                                    else:
-                                        st.warning(f"⚠️ Failed to download Odoo PDF for invoice: {invoice['invoice_number']}")
+                            # Generate PDF with all invoices for this client
+                            st.info(f"📄 Generating PDF with all invoices for {client}...")
+                            
+                            # Get the Odoo connector from session state
+                            if 'connector' in st.session_state:
+                                # Create PDF generator
+                                pdf_generator = InvoicePDFGenerator(st.session_state.connector)
+                                
+                                # Generate PDF with all invoices for this client
+                                def update_pdf_progress(message, progress):
+                                    st.info(f"📄 {message}")
+                                
+                                client_pdf = pdf_generator.generate_client_invoices_pdf(client, client, update_pdf_progress)
+                                
+                                if client_pdf:
+                                    # Create BytesIO object for the attachment
+                                    pdf_buffer = io.BytesIO(client_pdf)
+                                    pdf_buffer.name = f"Invoices_{client}.pdf"
+                                    all_attachments.append(pdf_buffer)
+                                    st.success(f"📄 Generated PDF with all invoices for {client}")
                                 else:
-                                    st.warning(f"⚠️ No Odoo connection available for invoice: {invoice['invoice_number']}")
+                                    st.warning(f"⚠️ Failed to generate PDF for {client}")
+                            else:
+                                st.warning(f"⚠️ No Odoo connection available for {client}")
                             
                             st.info(f"📎 Total attachments prepared: {len(all_attachments)}")
                             
