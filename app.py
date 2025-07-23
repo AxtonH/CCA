@@ -28,6 +28,12 @@ import tempfile
 import os
 import time
 from email_templates import get_template_by_type
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 # Load environment variables
 load_dotenv()
@@ -420,6 +426,81 @@ def generate_email_template(client_name, invoices, template_type="initial"):
     """
     
     return subject, html_body
+
+def generate_invoice_pdf(invoice_data, client_name):
+    """Generate a PDF invoice for the given invoice data"""
+    try:
+        # Create a BytesIO object to store the PDF
+        pdf_buffer = io.BytesIO()
+        
+        # Create the PDF document
+        doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
+        story = []
+        
+        # Get styles
+        styles = getSampleStyleSheet()
+        
+        # Create custom styles
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            spaceAfter=30,
+            alignment=TA_CENTER,
+            textColor=colors.darkblue
+        )
+        
+        header_style = ParagraphStyle(
+            'CustomHeader',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=20,
+            textColor=colors.darkblue
+        )
+        
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=10,
+            spaceAfter=12
+        )
+        
+        # Add title
+        story.append(Paragraph(f"INVOICE - {client_name}", title_style))
+        story.append(Spacer(1, 20))
+        
+        # Add invoice details
+        story.append(Paragraph(f"<b>Invoice Number:</b> {invoice_data['invoice_number']}", normal_style))
+        story.append(Paragraph(f"<b>Due Date:</b> {invoice_data['due_date']}", normal_style))
+        story.append(Paragraph(f"<b>Days Overdue:</b> {invoice_data['days_overdue']} days", normal_style))
+        story.append(Paragraph(f"<b>Amount Due:</b> {invoice_data['currency_symbol']}{invoice_data['amount_due']:,.2f}", normal_style))
+        
+        if invoice_data.get('origin'):
+            story.append(Paragraph(f"<b>Reference:</b> {invoice_data['origin']}", normal_style))
+        
+        story.append(Spacer(1, 20))
+        
+        # Add payment instructions
+        story.append(Paragraph("Payment Instructions:", header_style))
+        story.append(Paragraph("Please arrange payment for the outstanding amount as soon as possible.", normal_style))
+        story.append(Paragraph("For any questions, please contact our finance team.", normal_style))
+        
+        # Build the PDF
+        doc.build(story)
+        
+        # Get the PDF content
+        pdf_content = pdf_buffer.getvalue()
+        pdf_buffer.close()
+        
+        # Create a new BytesIO object for the attachment
+        attachment_buffer = io.BytesIO(pdf_content)
+        attachment_buffer.name = f"Invoice_{invoice_data['invoice_number']}_{client_name}.pdf"
+        
+        return attachment_buffer
+        
+    except Exception as e:
+        st.error(f"Error generating invoice PDF: {str(e)}")
+        return None
 
 def get_automatic_iban_attachment(reference_company):
     """Get automatic IBAN letter attachment based on reference company"""
@@ -1064,6 +1145,10 @@ with tab2:
                                 iban_filename = "IBAN Letter _ Prezlab FZ LLC .pdf" if reference_company == "Prezlab FZ LLC" else "IBAN Letter _ Prezlab Advanced Design Company .pdf"
                                 attachment_list.append(f"🏦 {iban_filename} (automatic - {reference_company})")
                             
+                            # Invoice PDFs
+                            for invoice in client_invoices_list:
+                                attachment_list.append(f"📄 Invoice_{invoice['invoice_number']}_{client}.pdf (generated)")
+                            
                             if attachment_list:
                                 for attachment in attachment_list:
                                     st.markdown(f"• {attachment}")
@@ -1151,6 +1236,16 @@ with tab2:
                                 st.success(f"📎 Automatically attaching IBAN letter for {reference_company}")
                             else:
                                 st.warning(f"⚠️ No IBAN letter found for {reference_company}")
+                            
+                            # Generate and add invoice PDFs for each invoice
+                            st.info(f"📄 Generating invoice PDFs for {len(client_invoices_list)} invoice(s)...")
+                            for invoice in client_invoices_list:
+                                invoice_pdf = generate_invoice_pdf(invoice, client)
+                                if invoice_pdf:
+                                    all_attachments.append(invoice_pdf)
+                                    st.success(f"📄 Generated PDF for invoice: {invoice['invoice_number']}")
+                                else:
+                                    st.warning(f"⚠️ Failed to generate PDF for invoice: {invoice['invoice_number']}")
                             
                             st.info(f"📎 Total attachments prepared: {len(all_attachments)}")
                             
