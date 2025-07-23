@@ -27,6 +27,7 @@ from webdriver_manager.firefox import GeckoDriverManager
 import tempfile
 import os
 import time
+from email_templates import get_template_by_type
 
 # Load environment variables
 load_dotenv()
@@ -366,8 +367,8 @@ def send_email(sender_email, sender_password, recipient_email, cc_list, subject,
         st.error(f"Error sending email: {str(e)}")
         return False
 
-def generate_simple_email_template(client_name, invoices, template_type="initial"):
-    """Generate simple email template"""
+def generate_email_template(client_name, invoices, template_type="initial"):
+    """Generate email template using the proper templates from email_templates.py"""
     total_amount = sum(invoice['amount_due'] for invoice in invoices)
     currency_symbol = invoices[0]['currency_symbol'] if invoices else "$"
     max_days = max(inv['days_overdue'] for inv in invoices)
@@ -392,45 +393,30 @@ def generate_simple_email_template(client_name, invoices, template_type="initial
     table_lines.append(f"| | | | **Total Overdue** | **{currency_symbol}{total_amount:,.2f}** |")
     
     table_text = '\n'.join(table_lines)
-
-    # Simple templates
-    templates = {
-        "initial": {
-            "subject": f"Payment Reminder - {client_name}",
-            "body": f"""
-            <h2>Dear {client_name},</h2>
-            <p>This is a friendly reminder that you have outstanding invoices totaling <strong>{currency_symbol}{total_amount:,.2f}</strong>.</p>
-            <p>Please find the details below:</p>
-            <pre>{table_text}</pre>
-            <p>Please arrange payment at your earliest convenience.</p>
-            <p>Best regards,<br>Finance Team</p>
-            """
-        },
-        "second": {
-            "subject": f"Urgent Payment Reminder - {client_name}",
-            "body": f"""
-            <h2>Dear {client_name},</h2>
-            <p>This is an urgent reminder that you have outstanding invoices totaling <strong>{currency_symbol}{total_amount:,.2f}</strong> that are overdue by up to {max_days} days.</p>
-            <p>Please find the details below:</p>
-            <pre>{table_text}</pre>
-            <p>Please arrange immediate payment to avoid any further action.</p>
-            <p>Best regards,<br>Finance Team</p>
-            """
-        },
-        "final": {
-            "subject": f"Final Payment Notice - {client_name}",
-            "body": f"""
-            <h2>Dear {client_name},</h2>
-            <p>This is a final notice regarding your outstanding invoices totaling <strong>{currency_symbol}{total_amount:,.2f}</strong> that are overdue by up to {max_days} days.</p>
-            <p>Please find the details below:</p>
-            <pre>{table_text}</pre>
-            <p>Immediate payment is required to avoid escalation.</p>
-            <p>Best regards,<br>Finance Team</p>
-            """
-        }
-    }
     
-    return templates[template_type]["subject"], templates[template_type]["body"]
+    # Get the proper template from email_templates.py
+    template = get_template_by_type(template_type)
+    
+    # Replace placeholders in the template
+    subject = template["subject"].replace("[Company Name]", client_name)
+    subject = subject.replace("[Amount]", f"{total_amount:,.2f}")
+    subject = subject.replace("[Currency]", currency_symbol)
+    
+    body = template["body"].replace("[Company Name]", client_name)
+    body = body.replace("[Amount]", f"{total_amount:,.2f}")
+    body = body.replace("[Currency]", currency_symbol)
+    body = body.replace("[Number of Days]", str(max_days))
+    body = body.replace("[Department Name]", "Finance Team")
+    body = body.replace("[TABLE]", table_text)
+    
+    # Convert to HTML format for better display
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        {body.replace(chr(10), '<br>')}
+    </div>
+    """
+    
+    return subject, html_body
 
 def get_automatic_iban_attachment(reference_company):
     """Get automatic IBAN letter attachment based on reference company"""
@@ -940,7 +926,7 @@ with tab2:
                             )
                             
                             # Subject for this specific client
-                            initial_subject, initial_body_text = generate_simple_email_template(client, client_invoices_list, client_template)
+                            initial_subject, initial_body_text = generate_email_template(client, client_invoices_list, client_template)
                             
                             client_subject = st.text_input(
                                 f"Subject for {client}:",
@@ -963,7 +949,7 @@ with tab2:
                         st.info(f"📝 Using '{client_template}' template - The email body below is automatically generated from the template. You can edit it if needed.")
                         
                         # Get the email template for this client
-                        _, email_template_body = generate_simple_email_template(client, client_invoices_list, client_template)
+                        _, email_template_body = generate_email_template(client, client_invoices_list, client_template)
                         
                         client_email_body = st.text_area(
                             "Email Body:",
@@ -1050,7 +1036,7 @@ with tab2:
                             continue
                         
                         # Use client-specific configuration
-                        _, body_text = generate_simple_email_template(client, client_invoices_list, config['template'])
+                        _, body_text = generate_email_template(client, client_invoices_list, config['template'])
                         
                         # Create expandable preview for each client
                         currency_symbol = client_invoices_list[0]['currency_symbol'] if client_invoices_list else "$"
@@ -1131,7 +1117,7 @@ with tab2:
                                 continue
                             
                             # Use client-specific configuration
-                            _, body_text = generate_simple_email_template(client, client_invoices_list, config['template'])
+                            _, body_text = generate_email_template(client, client_invoices_list, config['template'])
                             
                             # Use the template-generated body (not the text area content)
                             final_email_body = body_text
