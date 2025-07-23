@@ -29,18 +29,7 @@ import os
 import time
 from email_templates import get_template_by_type
 
-# Try to import reportlab for PDF generation, but make it optional
-try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
-    st.warning("⚠️ ReportLab not available - PDF generation will be disabled. Install with: pip install reportlab")
+# Note: We now use Odoo-generated PDFs instead of ReportLab
 
 # Load environment variables
 load_dotenv()
@@ -338,6 +327,51 @@ class OdooConnector:
         except Exception as e:
             st.error(f"Error fetching invoices: {str(e)}")
             return []
+    
+    def download_invoice_pdf(self, invoice_id):
+        """Download the actual Odoo-generated PDF for an invoice"""
+        try:
+            if not self.models:
+                return None
+            
+            # Call the report generation method in Odoo
+            # This uses the standard Odoo report generation
+            report_data = self.models.execute_kw(
+                self.database, self.uid, self.password,
+                'account.move', 'print_report',
+                [[invoice_id]],  # List of invoice IDs
+                {'report_name': 'account.report_invoice'}  # Standard invoice report
+            )
+            
+            if report_data and 'data' in report_data:
+                # The report data should contain the PDF content
+                pdf_content = report_data['data']
+                
+                # Create a BytesIO object for the attachment
+                import io
+                pdf_buffer = io.BytesIO(pdf_content)
+                
+                # Get invoice details for filename
+                invoice_details = self.models.execute_kw(
+                    self.database, self.uid, self.password,
+                    'account.move', 'read',
+                    [[invoice_id]],
+                    {'fields': ['name']}
+                )
+                
+                if invoice_details:
+                    invoice_name = invoice_details[0]['name']
+                    pdf_buffer.name = f"{invoice_name}.pdf"
+                else:
+                    pdf_buffer.name = f"Invoice_{invoice_id}.pdf"
+                
+                return pdf_buffer
+            
+            return None
+            
+        except Exception as e:
+            st.error(f"Error downloading invoice PDF for ID {invoice_id}: {str(e)}")
+            return None
 
 def send_email(sender_email, sender_password, recipient_email, cc_list, subject, body, attachments=None, smtp_server="smtp.gmail.com", smtp_port=587):
     """Send email with optional PDF attachments using SMTP"""
@@ -434,84 +468,7 @@ def generate_email_template(client_name, invoices, template_type="initial"):
     
     return subject, html_body
 
-def generate_invoice_pdf(invoice_data, client_name):
-    """Generate a PDF invoice for the given invoice data"""
-    if not REPORTLAB_AVAILABLE:
-        st.warning("⚠️ PDF generation disabled - ReportLab not available")
-        return None
-        
-    try:
-        # Create a BytesIO object to store the PDF
-        pdf_buffer = io.BytesIO()
-        
-        # Create the PDF document
-        doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
-        story = []
-        
-        # Get styles
-        styles = getSampleStyleSheet()
-        
-        # Create custom styles
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=18,
-            spaceAfter=30,
-            alignment=TA_CENTER,
-            textColor=colors.darkblue
-        )
-        
-        header_style = ParagraphStyle(
-            'CustomHeader',
-            parent=styles['Heading2'],
-            fontSize=14,
-            spaceAfter=20,
-            textColor=colors.darkblue
-        )
-        
-        normal_style = ParagraphStyle(
-            'CustomNormal',
-            parent=styles['Normal'],
-            fontSize=10,
-            spaceAfter=12
-        )
-        
-        # Add title
-        story.append(Paragraph(f"INVOICE - {client_name}", title_style))
-        story.append(Spacer(1, 20))
-        
-        # Add invoice details
-        story.append(Paragraph(f"<b>Invoice Number:</b> {invoice_data['invoice_number']}", normal_style))
-        story.append(Paragraph(f"<b>Due Date:</b> {invoice_data['due_date']}", normal_style))
-        story.append(Paragraph(f"<b>Days Overdue:</b> {invoice_data['days_overdue']} days", normal_style))
-        story.append(Paragraph(f"<b>Amount Due:</b> {invoice_data['currency_symbol']}{invoice_data['amount_due']:,.2f}", normal_style))
-        
-        if invoice_data.get('origin'):
-            story.append(Paragraph(f"<b>Reference:</b> {invoice_data['origin']}", normal_style))
-        
-        story.append(Spacer(1, 20))
-        
-        # Add payment instructions
-        story.append(Paragraph("Payment Instructions:", header_style))
-        story.append(Paragraph("Please arrange payment for the outstanding amount as soon as possible.", normal_style))
-        story.append(Paragraph("For any questions, please contact our finance team.", normal_style))
-        
-        # Build the PDF
-        doc.build(story)
-        
-        # Get the PDF content
-        pdf_content = pdf_buffer.getvalue()
-        pdf_buffer.close()
-        
-        # Create a new BytesIO object for the attachment
-        attachment_buffer = io.BytesIO(pdf_content)
-        attachment_buffer.name = f"Invoice_{invoice_data['invoice_number']}_{client_name}.pdf"
-        
-        return attachment_buffer
-        
-    except Exception as e:
-        st.error(f"Error generating invoice PDF: {str(e)}")
-        return None
+
 
 def get_automatic_iban_attachment(reference_company):
     """Get automatic IBAN letter attachment based on reference company"""
@@ -1157,11 +1114,8 @@ with tab2:
                                 attachment_list.append(f"🏦 {iban_filename} (automatic - {reference_company})")
                             
                             # Invoice PDFs
-                            if REPORTLAB_AVAILABLE:
-                                for invoice in client_invoices_list:
-                                    attachment_list.append(f"📄 Invoice_{invoice['invoice_number']}_{client}.pdf (generated)")
-                            else:
-                                attachment_list.append("📄 Invoice PDFs (disabled - ReportLab not available)")
+                            for invoice in client_invoices_list:
+                                attachment_list.append(f"📄 {invoice['invoice_number']}.pdf (Odoo-generated)")
                             
                             if attachment_list:
                                 for attachment in attachment_list:
@@ -1251,18 +1205,19 @@ with tab2:
                             else:
                                 st.warning(f"⚠️ No IBAN letter found for {reference_company}")
                             
-                            # Generate and add invoice PDFs for each invoice
-                            if REPORTLAB_AVAILABLE:
-                                st.info(f"📄 Generating invoice PDFs for {len(client_invoices_list)} invoice(s)...")
-                                for invoice in client_invoices_list:
-                                    invoice_pdf = generate_invoice_pdf(invoice, client)
+                            # Download and add Odoo-generated invoice PDFs for each invoice
+                            st.info(f"📄 Downloading Odoo invoice PDFs for {len(client_invoices_list)} invoice(s)...")
+                            for invoice in client_invoices_list:
+                                # Get the Odoo connector from session state
+                                if 'connector' in st.session_state:
+                                    invoice_pdf = st.session_state.connector.download_invoice_pdf(invoice['invoice_id'])
                                     if invoice_pdf:
                                         all_attachments.append(invoice_pdf)
-                                        st.success(f"📄 Generated PDF for invoice: {invoice['invoice_number']}")
+                                        st.success(f"📄 Downloaded Odoo PDF for invoice: {invoice['invoice_number']}")
                                     else:
-                                        st.warning(f"⚠️ Failed to generate PDF for invoice: {invoice['invoice_number']}")
-                            else:
-                                st.warning("⚠️ Invoice PDF generation is disabled - only IBAN letters will be attached")
+                                        st.warning(f"⚠️ Failed to download Odoo PDF for invoice: {invoice['invoice_number']}")
+                                else:
+                                    st.warning(f"⚠️ No Odoo connection available for invoice: {invoice['invoice_number']}")
                             
                             st.info(f"📎 Total attachments prepared: {len(all_attachments)}")
                             
