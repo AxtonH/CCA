@@ -823,6 +823,196 @@ with tab2:
                     help="Emails to CC for all emails"
                 )
             
+            # Individual Client Email Configuration
+            st.markdown("#### ✍️ Individual Client Email Configuration")
+            
+            # Create tabs for each selected client
+            if selected_clients:
+                client_tabs = st.tabs([f"📧 {client}" for client in selected_clients])
+                
+                # Store client-specific configurations
+                client_configs = {}
+                
+                for i, (client, tab) in enumerate(zip(selected_clients, client_tabs)):
+                    with tab:
+                        client_invoices_list = client_invoices[client]
+                        client_email = client_invoices_list[0]['client_email']
+                        max_days = max(inv['days_overdue'] for inv in client_invoices_list)
+                        
+                        # Client info header
+                        st.markdown(f"**Client:** {client}")
+                        
+                        # Tag-based client email input
+                        st.markdown(f"**Email for {client}:**")
+                        
+                        # Filter out invalid emails from the default list
+                        def is_valid_email(email):
+                            return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) and email.lower() not in ['na', 'n/a', 'none', '']
+                        
+                        # Start with empty list if the original email is invalid
+                        default_emails = []
+                        if client_email and is_valid_email(client_email):
+                            default_emails = [client_email]
+                        
+                        client_emails = st_tags(
+                            label=f"Add email addresses for {client}",
+                            text="Press enter to add more",
+                            value=default_emails,
+                            suggestions=[],
+                            maxtags=3,
+                            key=f"emails_{i}"
+                        )
+                        
+                        # Validate email addresses
+                        invalid_emails = [email for email in client_emails if not is_valid_email(email)]
+                        if invalid_emails:
+                            st.error(f"Invalid email(s) for {client}: {', '.join(invalid_emails)}")
+                            st.info("Please remove invalid emails and add valid ones. Valid emails should contain @ and a domain.")
+                        
+                        # Use the first valid email as the primary email
+                        valid_emails = [email for email in client_emails if is_valid_email(email)]
+                        client_email = valid_emails[0] if valid_emails else ""
+                        
+                        st.markdown(f"**Invoices:** {len(client_invoices_list)} | **Total Amount:** ${sum(inv['amount_due'] for inv in client_invoices_list):,.2f}")
+                        st.markdown(f"**Max Days Overdue:** {max_days}")
+                        
+                        # Email configuration in columns
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            # Individual template selection for this client
+                            client_template = st.selectbox(
+                                f"Email Template for {client}:",
+                                ["initial", "second", "final"],
+                                index=0,
+                                key=f"template_{i}",
+                                help=f"Select email template for {client}"
+                            )
+                            
+                            # Subject for this specific client
+                            _, initial_body_text = generate_simple_email_template(client, client_invoices_list, client_template)
+                            initial_subject, _ = generate_simple_email_template(client, client_invoices_list, client_template)
+                            
+                            client_subject = st.text_input(
+                                f"Subject for {client}:",
+                                value=initial_subject,
+                                key=f"subject_{i}",
+                                help="Edit the email subject for this specific client"
+                            )
+                        
+                        with col2:
+                            # Client-specific CC field
+                            client_cc_input = st.text_input(
+                                f"CC for {client} (comma-separated):",
+                                placeholder="Enter email addresses to CC for this client",
+                                key=f"cc_{i}",
+                                help="These emails will be CC'd in addition to the company CC list"
+                            )
+                        
+                        # Email body for this specific client
+                        st.markdown(f"**Email Body for {client}:**")
+                        
+                        # Get the email template for this client
+                        _, email_template_body = generate_simple_email_template(client, client_invoices_list, client_template)
+                        
+                        client_email_body = st.text_area(
+                            "Email Body:",
+                            value=email_template_body,
+                            height=250,
+                            key=f"body_{i}",
+                            help="Edit the email body for this specific client"
+                        )
+                        
+                        # Invoice Table Preview for this client
+                        st.markdown(f"**📋 Invoice Table for {client}:**")
+                        # Get currency symbol from first invoice for this client
+                        currency_symbol = client_invoices_list[0]['currency_symbol'] if client_invoices_list else "$"
+                        invoice_data = [
+                            {
+                                'Invoice Number': inv['invoice_number'],
+                                'Reference Company': inv['company_name'],
+                                'Origin': str(inv.get('origin', '')) if inv.get('origin') else '',
+                                'Due Date': inv['due_date'],
+                                'Days Overdue': f"{inv['days_overdue']} days",
+                                'Amount Due': f"{currency_symbol}{inv['amount_due']:,.2f}"
+                            }
+                            for inv in client_invoices_list
+                        ]
+                        df_invoice = pd.DataFrame(invoice_data)
+                        # Apply custom styling for better readability
+                        st.dataframe(
+                            df_invoice, 
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Invoice Number": st.column_config.TextColumn("Invoice Number", width="medium"),
+                                "Reference Company": st.column_config.TextColumn("Reference Company", width="medium"),
+                                "Origin": st.column_config.TextColumn("Origin", width="medium"),
+                                "Due Date": st.column_config.TextColumn("Due Date", width="small"),
+                                "Days Overdue": st.column_config.TextColumn("Days Overdue", width="small"),
+                                "Amount Due": st.column_config.TextColumn("Amount Due", width="small")
+                            }
+                        )
+                        
+                        # Store configuration for this client
+                        client_configs[client] = {
+                            'template': client_template,
+                            'subject': client_subject,
+                            'body': client_email_body,
+                            'cc': client_cc_input,
+                            'email': client_email,  # Primary email (first valid email)
+                            'all_emails': valid_emails,  # All valid emails for this client
+                            'invoices': client_invoices_list
+                        }
+            else:
+                st.info("Please select clients above to configure individual emails.")
+                client_configs = {}
+            
+            # Preview and send section
+            st.markdown("### 👀 Preview & Send")
+            
+            if st.button("🔍 Preview All Emails", type="secondary"):
+                if not selected_clients:
+                    st.error("Please select at least one client.")
+                else:
+                    st.markdown("### 📧 Email Previews")
+                    
+                    for i, client in enumerate(selected_clients):
+                        if client not in client_configs:
+                            st.error(f"❌ {client}: Configuration not found")
+                            continue
+                            
+                        config = client_configs[client]
+                        client_invoices_list = config['invoices']
+                        client_email = config['email']
+                        
+                        if not client_email:
+                            st.error(f"❌ {client}: No email address available")
+                            continue
+                        
+                        # Use client-specific configuration
+                        max_days = max(inv['days_overdue'] for inv in client_invoices_list)
+                        _, body_text = generate_simple_email_template(client, client_invoices_list, max_days, config['template'])
+                        
+                        # Create expandable preview for each client
+                        currency_symbol = client_invoices_list[0]['currency_symbol'] if client_invoices_list else "$"
+                        with st.expander(f"📧 {client} - {len(client_invoices_list)} invoice(s) - {currency_symbol}{sum(inv['amount_due'] for inv in client_invoices_list):,.2f}"):
+                            # Show all emails for this client
+                            if config.get('all_emails'):
+                                st.markdown(f"**To:** {', '.join(config['all_emails'])}")
+                            else:
+                                st.markdown(f"**To:** {client_email}")
+                            st.markdown(f"**Subject:** {config['subject']}")
+                            
+                            # Email Preview Section
+                            st.markdown("### 📧 Email Preview")
+                            
+                            # Use the processed email body directly (already contains all replacements)
+                            preview_text = body_text
+                            
+                            # Use st.text() for simple, reliable display
+                            st.text(preview_text)
+            
             # Email sending functionality
             st.markdown("### 📤 Send Emails")
             
@@ -850,33 +1040,64 @@ with tab2:
                         progress_bar.progress(progress)
                         
                         try:
-                            # Get client invoices
-                            client_invoices_list = client_invoices[client]
-                            client_email = client_invoices_list[0]['client_email']
+                            # Get client-specific configuration
+                            if client not in client_configs:
+                                failed_sends += 1
+                                failed_clients.append(f"{client} (no configuration)")
+                                continue
+                                
+                            config = client_configs[client]
+                            client_invoices_list = config['invoices']
+                            client_email = config['email']
                             
                             if not client_email:
                                 failed_sends += 1
                                 failed_clients.append(f"{client} (no email)")
                                 continue
                             
-                            # Generate email content
-                            subject, body = generate_simple_email_template(client, client_invoices_list, email_template)
+                            # Use client-specific configuration
+                            max_days = max(inv['days_overdue'] for inv in client_invoices_list)
+                            _, body_text = generate_simple_email_template(client, client_invoices_list, max_days, config['template'])
                             
-                            # Send email
+                            # Use the processed email body directly (already contains the table)
+                            final_email_body = body_text.replace('\n', '<br>')
+                            
+                            # Combine company CC with client-specific CC
+                            client_cc_emails = []
+                            if config['cc']:
+                                client_cc_emails = [email.strip() for email in config['cc'].split(",") if email.strip()]
+                                # Validate client CC emails
+                                def is_valid_email(email):
+                                    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email)
+                                client_cc_emails = [email for email in client_cc_emails if is_valid_email(email)]
+                            
+                            all_cc_emails = cc_emails + client_cc_emails
+                            all_cc_emails = list(dict.fromkeys(all_cc_emails))  # Remove duplicates
+                            
+                            # Send email with proper error handling
                             try:
-                                # Get sender password from session state
-                                sender_password = st.session_state.get('sender_password', '')
+                                # Get sender password from environment or session state
+                                sender_password = os.getenv('SENDER_PASSWORD') or st.session_state.get('sender_password', '')
                                 
                                 if not sender_password:
-                                    st.error("Sender password not configured. Please set EMAIL_PASSWORD in environment variables.")
+                                    st.error("Sender password not configured. Please set SENDER_PASSWORD in environment variables.")
                                     break
                                 
-                                # Send the email
-                                if send_email(sender_email, sender_password, client_email, cc_emails, subject, body):
+                                # Send emails to all addresses for this client
+                                client_all_emails = config.get('all_emails', [client_email])
+                                emails_sent = 0
+                                
+                                for email_address in client_all_emails:
+                                    if email_address and is_valid_email(email_address):
+                                        # Send the email with client-specific configuration
+                                        send_email(sender_email, sender_password, email_address, all_cc_emails, config['subject'], final_email_body)
+                                        emails_sent += 1
+                                
+                                if emails_sent > 0:
                                     successful_sends += 1
                                 else:
                                     failed_sends += 1
-                                    failed_clients.append(f"{client} (email error)")
+                                    failed_clients.append(f"{client} (no valid emails)")
                                 
                             except Exception as email_error:
                                 failed_sends += 1
