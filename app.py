@@ -927,17 +927,26 @@ with tab2:
                         st.markdown(f"**📋 Invoice Table for {client}:**")
                         # Get currency symbol from first invoice for this client
                         currency_symbol = client_invoices_list[0]['currency_symbol'] if client_invoices_list else "$"
-                        invoice_data = [
-                            {
+                        invoice_data = []
+                        for inv in client_invoices_list:
+                            # Safely handle origin field - convert to string and handle None/boolean values
+                            origin_value = inv.get('origin', '')
+                            if origin_value is None:
+                                origin_str = ''
+                            elif isinstance(origin_value, bool):
+                                origin_str = str(origin_value)
+                            else:
+                                origin_str = str(origin_value)
+                            
+                            invoice_data.append({
                                 'Invoice Number': inv['invoice_number'],
                                 'Reference Company': inv['company_name'],
-                                'Origin': str(inv.get('origin', '')) if inv.get('origin') else '',
+                                'Origin': origin_str,
                                 'Due Date': inv['due_date'],
                                 'Days Overdue': f"{inv['days_overdue']} days",
                                 'Amount Due': f"{currency_symbol}{inv['amount_due']:,.2f}"
-                            }
-                            for inv in client_invoices_list
-                        ]
+                            })
+                        
                         df_invoice = pd.DataFrame(invoice_data)
                         # Apply custom styling for better readability
                         st.dataframe(
@@ -991,8 +1000,7 @@ with tab2:
                             continue
                         
                         # Use client-specific configuration
-                        max_days = max(inv['days_overdue'] for inv in client_invoices_list)
-                        _, body_text = generate_simple_email_template(client, client_invoices_list, max_days, config['template'])
+                        _, body_text = generate_simple_email_template(client, client_invoices_list, config['template'])
                         
                         # Create expandable preview for each client
                         currency_symbol = client_invoices_list[0]['currency_symbol'] if client_invoices_list else "$"
@@ -1056,8 +1064,7 @@ with tab2:
                                 continue
                             
                             # Use client-specific configuration
-                            max_days = max(inv['days_overdue'] for inv in client_invoices_list)
-                            _, body_text = generate_simple_email_template(client, client_invoices_list, max_days, config['template'])
+                            _, body_text = generate_simple_email_template(client, client_invoices_list, config['template'])
                             
                             # Use the processed email body directly (already contains the table)
                             final_email_body = body_text.replace('\n', '<br>')
