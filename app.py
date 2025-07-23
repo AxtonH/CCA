@@ -940,8 +940,7 @@ with tab2:
                             )
                             
                             # Subject for this specific client
-                            _, initial_body_text = generate_simple_email_template(client, client_invoices_list, client_template)
-                            initial_subject, _ = generate_simple_email_template(client, client_invoices_list, client_template)
+                            initial_subject, initial_body_text = generate_simple_email_template(client, client_invoices_list, client_template)
                             
                             client_subject = st.text_input(
                                 f"Subject for {client}:",
@@ -961,6 +960,7 @@ with tab2:
                         
                         # Email body for this specific client
                         st.markdown(f"**Email Body for {client}:**")
+                        st.info(f"📝 Using '{client_template}' template - The email body below is automatically generated from the template. You can edit it if needed.")
                         
                         # Get the email template for this client
                         _, email_template_body = generate_simple_email_template(client, client_invoices_list, client_template)
@@ -1085,8 +1085,8 @@ with tab2:
                             # Use the processed email body directly (already contains all replacements)
                             preview_text = body_text
                             
-                            # Use st.text() for simple, reliable display
-                            st.text(preview_text)
+                            # Display as HTML for proper formatting
+                            st.markdown(preview_text, unsafe_allow_html=True)
             
             # Email sending functionality
             st.markdown("### 📤 Send Emails")
@@ -1133,8 +1133,8 @@ with tab2:
                             # Use client-specific configuration
                             _, body_text = generate_simple_email_template(client, client_invoices_list, config['template'])
                             
-                            # Use the processed email body directly (already contains the table)
-                            final_email_body = body_text.replace('\n', '<br>')
+                            # Use the template-generated body (not the text area content)
+                            final_email_body = body_text
                             
                             # Combine company CC with client-specific CC
                             client_cc_emails = []
