@@ -28,12 +28,19 @@ import tempfile
 import os
 import time
 from email_templates import get_template_by_type
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+# Try to import reportlab for PDF generation, but make it optional
+try:
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    st.warning("⚠️ ReportLab not available - PDF generation will be disabled. Install with: pip install reportlab")
 
 # Load environment variables
 load_dotenv()
@@ -429,6 +436,10 @@ def generate_email_template(client_name, invoices, template_type="initial"):
 
 def generate_invoice_pdf(invoice_data, client_name):
     """Generate a PDF invoice for the given invoice data"""
+    if not REPORTLAB_AVAILABLE:
+        st.warning("⚠️ PDF generation disabled - ReportLab not available")
+        return None
+        
     try:
         # Create a BytesIO object to store the PDF
         pdf_buffer = io.BytesIO()
@@ -1146,8 +1157,11 @@ with tab2:
                                 attachment_list.append(f"🏦 {iban_filename} (automatic - {reference_company})")
                             
                             # Invoice PDFs
-                            for invoice in client_invoices_list:
-                                attachment_list.append(f"📄 Invoice_{invoice['invoice_number']}_{client}.pdf (generated)")
+                            if REPORTLAB_AVAILABLE:
+                                for invoice in client_invoices_list:
+                                    attachment_list.append(f"📄 Invoice_{invoice['invoice_number']}_{client}.pdf (generated)")
+                            else:
+                                attachment_list.append("📄 Invoice PDFs (disabled - ReportLab not available)")
                             
                             if attachment_list:
                                 for attachment in attachment_list:
@@ -1238,14 +1252,17 @@ with tab2:
                                 st.warning(f"⚠️ No IBAN letter found for {reference_company}")
                             
                             # Generate and add invoice PDFs for each invoice
-                            st.info(f"📄 Generating invoice PDFs for {len(client_invoices_list)} invoice(s)...")
-                            for invoice in client_invoices_list:
-                                invoice_pdf = generate_invoice_pdf(invoice, client)
-                                if invoice_pdf:
-                                    all_attachments.append(invoice_pdf)
-                                    st.success(f"📄 Generated PDF for invoice: {invoice['invoice_number']}")
-                                else:
-                                    st.warning(f"⚠️ Failed to generate PDF for invoice: {invoice['invoice_number']}")
+                            if REPORTLAB_AVAILABLE:
+                                st.info(f"📄 Generating invoice PDFs for {len(client_invoices_list)} invoice(s)...")
+                                for invoice in client_invoices_list:
+                                    invoice_pdf = generate_invoice_pdf(invoice, client)
+                                    if invoice_pdf:
+                                        all_attachments.append(invoice_pdf)
+                                        st.success(f"📄 Generated PDF for invoice: {invoice['invoice_number']}")
+                                    else:
+                                        st.warning(f"⚠️ Failed to generate PDF for invoice: {invoice['invoice_number']}")
+                            else:
+                                st.warning("⚠️ Invoice PDF generation is disabled - only IBAN letters will be attached")
                             
                             st.info(f"📎 Total attachments prepared: {len(all_attachments)}")
                             
