@@ -345,6 +345,9 @@ def send_email(sender_email, sender_password, recipient_email, cc_list, subject,
                 if attachment is not None:
                     # Create attachment
                     part = MIMEBase('application', 'octet-stream')
+                    
+                    # Reset file pointer to beginning and read content
+                    attachment.seek(0)
                     part.set_payload(attachment.read())
                     encoders.encode_base64(part)
                     
@@ -432,6 +435,7 @@ def get_automatic_iban_attachment(reference_company):
     # Get the filename for the company
     filename = iban_letter_mapping.get(reference_company)
     if not filename:
+        st.warning(f"⚠️ No IBAN letter mapping found for company: {reference_company}")
         return None
     
     # Construct the full file path
@@ -452,6 +456,7 @@ def get_automatic_iban_attachment(reference_company):
         file_obj = io.BytesIO(file_content)
         file_obj.name = filename  # Set the filename for the email attachment
         
+        st.success(f"✅ Successfully loaded IBAN letter: {filename} ({len(file_content)} bytes)")
         return file_obj
     except Exception as e:
         st.error(f"Error reading IBAN letter file for {reference_company}: {str(e)}")
@@ -1139,10 +1144,15 @@ with tab2:
                             
                             # Add automatic IBAN letter attachment based on reference company
                             reference_company = client_invoices_list[0]['company_name'] if client_invoices_list else "Unknown"
+                            st.info(f"🔍 Looking for IBAN letter for company: {reference_company}")
                             automatic_iban_attachment = get_automatic_iban_attachment(reference_company)
                             if automatic_iban_attachment:
                                 all_attachments.append(automatic_iban_attachment)
-                                st.info(f"📎 Automatically attaching IBAN letter for {reference_company}")
+                                st.success(f"📎 Automatically attaching IBAN letter for {reference_company}")
+                            else:
+                                st.warning(f"⚠️ No IBAN letter found for {reference_company}")
+                            
+                            st.info(f"📎 Total attachments prepared: {len(all_attachments)}")
                             
                             # Send email with proper error handling
                             try:
