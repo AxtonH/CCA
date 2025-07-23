@@ -138,26 +138,41 @@ def attempt_auto_login():
         return
     
     try:
-        # Create progress indicator for auto-login
-        with st.spinner("🔄 Attempting automatic Odoo login..."):
-            # Create connector and attempt connection
-            connector = OdooConnector(odoo_url, odoo_database, odoo_username, odoo_password)
-            if connector.connect():
-                # Fetch overdue invoices
-                invoices = connector.get_overdue_invoices()
-                
-                # Check for clients missing email
-                missing_email_clients = [inv for inv in invoices if not inv['client_email']]
-                
-                # Store in session state
-                st.session_state.odoo_connected = True
-                st.session_state.connector = connector
-                st.session_state.overdue_invoices = invoices
-                st.session_state.clients_missing_email = missing_email_clients
-                
-                st.success(f"✅ Automatic login successful! Found {len(invoices)} overdue invoices.")
-            else:
-                st.warning("⚠️ Automatic login failed. Please check your credentials in the sidebar.")
+        # Create progress indicator for auto-login with timeout
+        import signal
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Auto-login timed out after 30 seconds")
+        
+        # Set timeout for auto-login (30 seconds)
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(30)
+        
+        try:
+            with st.spinner("🔄 Attempting automatic Odoo login..."):
+                # Create connector and attempt connection
+                connector = OdooConnector(odoo_url, odoo_database, odoo_username, odoo_password)
+                if connector.connect():
+                    # Fetch overdue invoices
+                    invoices = connector.get_overdue_invoices()
+                    
+                    # Check for clients missing email
+                    missing_email_clients = [inv for inv in invoices if not inv['client_email']]
+                    
+                    # Store in session state
+                    st.session_state.odoo_connected = True
+                    st.session_state.connector = connector
+                    st.session_state.overdue_invoices = invoices
+                    st.session_state.clients_missing_email = missing_email_clients
+                    
+                    st.success(f"✅ Automatic login successful! Found {len(invoices)} overdue invoices.")
+                else:
+                    st.warning("⚠️ Automatic login failed. Please check your credentials in the sidebar.")
+        finally:
+            signal.alarm(0)  # Cancel the alarm
+            
+    except TimeoutError:
+        st.warning("⚠️ Automatic login timed out. Please connect manually using the sidebar.")
     except Exception as e:
         st.warning(f"⚠️ Automatic login failed: {str(e)}")
     finally:
@@ -1380,7 +1395,7 @@ def send_email(sender_email, sender_password, recipient_email, cc_list, subject,
         return False
 
 # Attempt automatic login on app launch (after all classes are defined)
-attempt_auto_login()
+# attempt_auto_login()  # Temporarily disabled for debugging
 
 # Sidebar
 with st.sidebar:
