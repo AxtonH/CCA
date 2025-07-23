@@ -372,16 +372,27 @@ def generate_simple_email_template(client_name, invoices, template_type="initial
     currency_symbol = invoices[0]['currency_symbol'] if invoices else "$"
     max_days = max(inv['days_overdue'] for inv in invoices)
     
-    # Simple table
+    # Create table in the format shown in the image
     table_lines = []
-    table_lines.append("| Invoice | Due Date | Days Overdue | Amount |")
-    table_lines.append("|---------|----------|--------------|--------|")
+    table_lines.append("| Reference | Date | Due Date | Origin | Total Due |")
+    table_lines.append("|-----------|------|----------|--------|-----------|")
     
     for inv in invoices:
-        table_lines.append(f"| {inv['invoice_number']} | {inv['due_date']} | {inv['days_overdue']} days | {currency_symbol}{inv['amount_due']:,.2f} |")
+        # Format the data according to the image format
+        reference = inv['invoice_number']
+        date = inv['due_date']  # Using due date as invoice date for now
+        due_date = inv['due_date']
+        origin = inv.get('origin', '')[:10] if inv.get('origin') else ''  # Truncate origin
+        total_due = f"{currency_symbol}{inv['amount_due']:,.2f}"
+        
+        table_lines.append(f"| {reference} | {date} | {due_date} | {origin} | {total_due} |")
+    
+    # Add summary rows
+    table_lines.append(f"| | | | **Total Due** | **{currency_symbol}{total_amount:,.2f}** |")
+    table_lines.append(f"| | | | **Total Overdue** | **{currency_symbol}{total_amount:,.2f}** |")
     
     table_text = '\n'.join(table_lines)
-    
+
     # Simple templates
     templates = {
         "initial": {
@@ -420,6 +431,45 @@ def generate_simple_email_template(client_name, invoices, template_type="initial
     }
     
     return templates[template_type]["subject"], templates[template_type]["body"]
+
+def get_automatic_iban_attachment(reference_company):
+    """Get automatic IBAN letter attachment based on reference company"""
+    import os
+    import tempfile
+    
+    # Define the mapping of companies to their IBAN letter files
+    iban_letter_mapping = {
+        "Prezlab FZ LLC": "IBAN Letter _ Prezlab FZ LLC .pdf",
+        "Prezlab Advanced Design Company": "IBAN Letter _ Prezlab Advanced Design Company .pdf"
+    }
+    
+    # Get the filename for the company
+    filename = iban_letter_mapping.get(reference_company)
+    if not filename:
+        return None
+    
+    # Construct the full file path
+    file_path = os.path.join(os.getcwd(), filename)
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        st.warning(f"⚠️ IBAN letter file not found for {reference_company}: {file_path}")
+        return None
+    
+    try:
+        # Read the file content into memory and create a temporary file-like object
+        with open(file_path, 'rb') as file:
+            file_content = file.read()
+        
+        # Create a BytesIO object that can be used multiple times
+        import io
+        file_obj = io.BytesIO(file_content)
+        file_obj.name = filename  # Set the filename for the email attachment
+        
+        return file_obj
+    except Exception as e:
+        st.error(f"Error reading IBAN letter file for {reference_company}: {str(e)}")
+        return None
 
 # Sidebar
 with st.sidebar:
@@ -1012,6 +1062,23 @@ with tab2:
                                 st.markdown(f"**To:** {client_email}")
                             st.markdown(f"**Subject:** {config['subject']}")
                             
+                            # Show attachments that will be included
+                            st.markdown("### 📎 Attachments")
+                            attachment_list = []
+                            
+                            # Automatic IBAN letter
+                            reference_company = client_invoices_list[0]['company_name'] if client_invoices_list else "Unknown"
+                            automatic_iban_attachment = get_automatic_iban_attachment(reference_company)
+                            if automatic_iban_attachment:
+                                iban_filename = "IBAN Letter _ Prezlab FZ LLC .pdf" if reference_company == "Prezlab FZ LLC" else "IBAN Letter _ Prezlab Advanced Design Company .pdf"
+                                attachment_list.append(f"🏦 {iban_filename} (automatic - {reference_company})")
+                            
+                            if attachment_list:
+                                for attachment in attachment_list:
+                                    st.markdown(f"• {attachment}")
+                            else:
+                                st.markdown("• No attachments")
+                            
                             # Email Preview Section
                             st.markdown("### 📧 Email Preview")
                             
@@ -1081,6 +1148,16 @@ with tab2:
                             all_cc_emails = cc_emails + client_cc_emails
                             all_cc_emails = list(dict.fromkeys(all_cc_emails))  # Remove duplicates
                             
+                            # Prepare attachments for all emails
+                            all_attachments = []
+                            
+                            # Add automatic IBAN letter attachment based on reference company
+                            reference_company = client_invoices_list[0]['company_name'] if client_invoices_list else "Unknown"
+                            automatic_iban_attachment = get_automatic_iban_attachment(reference_company)
+                            if automatic_iban_attachment:
+                                all_attachments.append(automatic_iban_attachment)
+                                st.info(f"📎 Automatically attaching IBAN letter for {reference_company}")
+                            
                             # Send email with proper error handling
                             try:
                                 # Get sender password from environment or session state
@@ -1097,7 +1174,7 @@ with tab2:
                                 for email_address in client_all_emails:
                                     if email_address and is_valid_email(email_address):
                                         # Send the email with client-specific configuration
-                                        send_email(sender_email, sender_password, email_address, all_cc_emails, config['subject'], final_email_body)
+                                        send_email(sender_email, sender_password, email_address, all_cc_emails, config['subject'], final_email_body, attachments=all_attachments)
                                         emails_sent += 1
                                 
                                 if emails_sent > 0:
