@@ -325,8 +325,115 @@ class OdooConnector:
             st.error(f"Error fetching invoices: {str(e)}")
             return []
 
+def send_email(sender_email, sender_password, recipient_email, cc_list, subject, body, attachments=None, smtp_server="smtp.gmail.com", smtp_port=587):
+    """Send email with optional PDF attachments using SMTP"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+        msg['Cc'] = ', '.join(cc_list) if cc_list else ''
+        
+        # Add text part
+        text_part = MIMEText(body, 'html')  # Changed to HTML to support formatting
+        msg.attach(text_part)
+        
+        # Add attachments if provided
+        if attachments:
+            for attachment in attachments:
+                if attachment is not None:
+                    # Create attachment
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(attachment.read())
+                    encoders.encode_base64(part)
+                    
+                    # Set filename
+                    filename = attachment.name
+                    part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename= {filename}'
+                    )
+                    msg.attach(part)
+        
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        recipients = [recipient_email] + cc_list
+        server.sendmail(sender_email, recipients, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Error sending email: {str(e)}")
+        return False
+
+def generate_simple_email_template(client_name, invoices, template_type="initial"):
+    """Generate simple email template"""
+    total_amount = sum(invoice['amount_due'] for invoice in invoices)
+    currency_symbol = invoices[0]['currency_symbol'] if invoices else "$"
+    max_days = max(inv['days_overdue'] for inv in invoices)
+    
+    # Simple table
+    table_lines = []
+    table_lines.append("| Invoice | Due Date | Days Overdue | Amount |")
+    table_lines.append("|---------|----------|--------------|--------|")
+    
+    for inv in invoices:
+        table_lines.append(f"| {inv['invoice_number']} | {inv['due_date']} | {inv['days_overdue']} days | {currency_symbol}{inv['amount_due']:,.2f} |")
+    
+    table_text = '\n'.join(table_lines)
+    
+    # Simple templates
+    templates = {
+        "initial": {
+            "subject": f"Payment Reminder - {client_name}",
+            "body": f"""
+            <h2>Dear {client_name},</h2>
+            <p>This is a friendly reminder that you have outstanding invoices totaling <strong>{currency_symbol}{total_amount:,.2f}</strong>.</p>
+            <p>Please find the details below:</p>
+            <pre>{table_text}</pre>
+            <p>Please arrange payment at your earliest convenience.</p>
+            <p>Best regards,<br>Finance Team</p>
+            """
+        },
+        "second": {
+            "subject": f"Urgent Payment Reminder - {client_name}",
+            "body": f"""
+            <h2>Dear {client_name},</h2>
+            <p>This is an urgent reminder that you have outstanding invoices totaling <strong>{currency_symbol}{total_amount:,.2f}</strong> that are overdue by up to {max_days} days.</p>
+            <p>Please find the details below:</p>
+            <pre>{table_text}</pre>
+            <p>Please arrange immediate payment to avoid any further action.</p>
+            <p>Best regards,<br>Finance Team</p>
+            """
+        },
+        "final": {
+            "subject": f"Final Payment Notice - {client_name}",
+            "body": f"""
+            <h2>Dear {client_name},</h2>
+            <p>This is a final notice regarding your outstanding invoices totaling <strong>{currency_symbol}{total_amount:,.2f}</strong> that are overdue by up to {max_days} days.</p>
+            <p>Please find the details below:</p>
+            <pre>{table_text}</pre>
+            <p>Immediate payment is required to avoid escalation.</p>
+            <p>Best regards,<br>Finance Team</p>
+            """
+        }
+    }
+    
+    return templates[template_type]["subject"], templates[template_type]["body"]
+
 # Sidebar
 with st.sidebar:
+    st.markdown('<div class="sidebar-header">📧 Email Configuration</div>', unsafe_allow_html=True)
+    
+    # Email configuration
+    default_sender_email = get_secret("EMAIL", "")
+    sender_email = st.text_input("Sender Email", value=default_sender_email, help="Email address to send from")
+    
+    default_sender_password = get_secret("EMAIL_PASSWORD", "")
+    sender_password = st.text_input("Sender Password", type="password", value=default_sender_password, help="Password for sender email account")
+    if sender_password:
+        st.session_state.sender_password = sender_password
+    
     st.markdown('<div class="sidebar-header">🔗 Odoo Connection</div>', unsafe_allow_html=True)
     
     # Demo mode option
@@ -595,7 +702,212 @@ with tab2:
     elif not st.session_state.overdue_invoices:
         st.success("🎉 No overdue invoices to send bulk emails for!")
     else:
-        st.info("📧 Email functionality will be restored in the next update.")
+        # Group invoices by client for multi-selection
+        client_invoices = {}
+        for invoice in st.session_state.overdue_invoices:
+            client_name = invoice['client_name']
+            if client_name not in client_invoices:
+                client_invoices[client_name] = []
+            client_invoices[client_name].append(invoice)
+        
+        st.markdown("### 👥 Multi-Client Selection")
+        
+        # Group clients by overdue period for better organization
+        recent_clients = []
+        moderate_clients = []
+        severe_clients = []
+        
+        for client_name, invoices in client_invoices.items():
+            max_days = max(inv['days_overdue'] for inv in invoices)
+            if max_days <= 15:
+                recent_clients.append(client_name)
+            elif max_days <= 30:
+                moderate_clients.append(client_name)
+            else:
+                severe_clients.append(client_name)
+        
+        # Create multi-select with grouping
+        st.markdown("#### Select Clients to Send Emails To:")
+        
+        selected_clients = []
+        
+        # Recent clients section
+        if recent_clients:
+            st.markdown("**🔵 Recent (≤ 15 days):**")
+            recent_selected = st.multiselect(
+                "Choose from recent overdue clients:",
+                recent_clients,
+                key="recent_multiselect",
+                help="Select clients with invoices overdue 15 days or less"
+            )
+            selected_clients.extend(recent_selected)
+        
+        # Moderate clients section
+        if moderate_clients:
+            st.markdown("**🟡 Moderate (16-30 days):**")
+            moderate_selected = st.multiselect(
+                "Choose from moderate overdue clients:",
+                moderate_clients,
+                key="moderate_multiselect",
+                help="Select clients with invoices overdue 16-30 days"
+            )
+            selected_clients.extend(moderate_selected)
+        
+        # Severe clients section
+        if severe_clients:
+            st.markdown("**🔴 Severe (31+ days):**")
+            severe_selected = st.multiselect(
+                "Choose from severely overdue clients:",
+                severe_clients,
+                key="severe_multiselect",
+                help="Select clients with invoices overdue 31+ days"
+            )
+            selected_clients.extend(severe_selected)
+        
+        # Show selection summary
+        if selected_clients:
+            st.markdown(f"### 📋 Selected Clients ({len(selected_clients)})")
+            
+            # Create summary table
+            summary_data = []
+            for client in selected_clients:
+                invoices = client_invoices[client]
+                total_amount = sum(inv['amount_due'] for inv in invoices)
+                max_days = max(inv['days_overdue'] for inv in invoices)
+                has_email = any(inv['client_email'] for inv in invoices)
+                
+                # Get currency symbol from first invoice for this client
+                currency_symbol = invoices[0]['currency_symbol'] if invoices else "$"
+                
+                # Get reference company from first invoice
+                reference_company = invoices[0]['company_name'] if invoices else "Unknown"
+                
+                summary_data.append({
+                    'Client': client,
+                    'Reference Company': reference_company,
+                    'Invoices': len(invoices),
+                    'Total Amount': f"{currency_symbol}{total_amount:,.2f}",
+                    'Max Days Overdue': max_days,
+                    'Has Email': "✅" if has_email else "❌"
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            st.dataframe(summary_df, use_container_width=True)
+            
+            # Check for clients without emails
+            clients_without_email = [client for client in selected_clients 
+                                   if not any(inv['client_email'] for inv in client_invoices[client])]
+            
+            if clients_without_email:
+                st.warning(f"⚠️ The following clients don't have email addresses: {', '.join(clients_without_email)}")
+            
+            # Email configuration
+            st.markdown("### ⚙️ Email Configuration")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Email template selection
+                email_template = st.selectbox(
+                    "Email Template:",
+                    ["initial", "second", "final"],
+                    index=0,
+                    help="Select the email template to use for all clients"
+                )
+            
+            with col2:
+                # CC configuration
+                cc_list = st.text_input(
+                    "CC List (comma-separated):",
+                    value="",
+                    help="Emails to CC for all emails"
+                )
+            
+            # Email sending functionality
+            st.markdown("### 📤 Send Emails")
+            
+            if st.button("📧 Send Bulk Emails", type="primary"):
+                if not selected_clients:
+                    st.error("Please select at least one client.")
+                elif not sender_email:
+                    st.error("Please configure sender email in the sidebar.")
+                else:
+                    # Parse CC list
+                    cc_emails = [email.strip() for email in cc_list.split(",") if email.strip()]
+                    
+                    # Progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    successful_sends = 0
+                    failed_sends = 0
+                    failed_clients = []
+                    
+                    for i, client in enumerate(selected_clients):
+                        # Update progress
+                        progress = (i + 1) / len(selected_clients)
+                        status_text.text(f"Sending email to {client}... ({i + 1}/{len(selected_clients)})")
+                        progress_bar.progress(progress)
+                        
+                        try:
+                            # Get client invoices
+                            client_invoices_list = client_invoices[client]
+                            client_email = client_invoices_list[0]['client_email']
+                            
+                            if not client_email:
+                                failed_sends += 1
+                                failed_clients.append(f"{client} (no email)")
+                                continue
+                            
+                            # Generate email content
+                            subject, body = generate_simple_email_template(client, client_invoices_list, email_template)
+                            
+                            # Send email
+                            try:
+                                # Get sender password from session state
+                                sender_password = st.session_state.get('sender_password', '')
+                                
+                                if not sender_password:
+                                    st.error("Sender password not configured. Please set EMAIL_PASSWORD in environment variables.")
+                                    break
+                                
+                                # Send the email
+                                if send_email(sender_email, sender_password, client_email, cc_emails, subject, body):
+                                    successful_sends += 1
+                                else:
+                                    failed_sends += 1
+                                    failed_clients.append(f"{client} (email error)")
+                                
+                            except Exception as email_error:
+                                failed_sends += 1
+                                failed_clients.append(f"{client} (email error: {str(email_error)})")
+                                continue
+                            
+                            # Small delay to prevent overwhelming the email server
+                            time.sleep(0.5)
+                            
+                        except Exception as e:
+                            failed_sends += 1
+                            failed_clients.append(f"{client} ({str(e)})")
+                    
+                    # Final status update
+                    progress_bar.progress(1.0)
+                    status_text.text("Bulk email operation completed!")
+                    
+                    # Show results
+                    if successful_sends > 0:
+                        st.success(f"✅ Successfully sent {successful_sends} email(s)")
+                    
+                    if failed_sends > 0:
+                        st.error(f"❌ Failed to send {failed_sends} email(s)")
+                        st.markdown("**Failed clients:**")
+                        for failed in failed_clients:
+                            st.markdown(f"- {failed}")
+                    
+                    # Summary
+                    st.info(f"📊 **Summary:** {successful_sends} successful, {failed_sends} failed out of {len(selected_clients)} total clients")
+        else:
+            st.info("👆 Select clients from the sections above to send bulk emails.")
 
 # Footer
 st.markdown("---")
